@@ -1,7 +1,7 @@
 """
 Malaria transmission ODE model with seasonal mosquito density forcing.
 
-Translates mahmud_py/demo_sim_endemic.R to Python using scipy, numpy, and matplotlib.
+Translates mahmud_model/demo_sim_endemic.R to Python using scipy, numpy, and matplotlib.
 """
 
 import numpy as np
