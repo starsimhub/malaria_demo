@@ -1,51 +1,31 @@
 """
-Malaria transmission ODE model with seasonal mosquito density forcing.
+Malaria transmission model with seasonal mosquito density forcing (Starsim version).
 
-Translates mahmud_model/demo_sim_endemic.R to Python using scipy, numpy, and matplotlib.
+Converts the scipy ODE model (demo_sim.py) into a Starsim Module with Euler integration,
+following the pattern of TB_SS in tbsim/compartmental/lshtm_ode.py.
+
+Example
+-------
+::
+
+    import starsim as ss
+    from demo_sim_ss import Malaria_SS
+
+    mal = Malaria_SS()
+    sim = ss.Sim(modules=mal, copy_inputs=False, start=0, stop=365*5, dt=1, n_agents=1)
+    sim.run()
+    mal.plot()
 """
 
 import numpy as np
-from scipy.integrate import solve_ivp
-from scipy.stats import norm
+import sciris as sc
+import starsim as ss
 import matplotlib.pyplot as plt
+from scipy.stats import norm
 
 
 # ============================================================
-# ODE with time-varying seasonal mosquito density
-# ============================================================
-def malaria_ode_seasonal(t, x, params):
-    n = params["numpatch"]
-    X = x[:n]
-    # C = x[n:]  # cumulative incidence state variables
-
-    # Seasonal mosquito density: m(t) = m_base * seasonal_factor(t)
-    m = params["m_base"] * params["seasonal_fn"](t)
-
-    pij = params["pij"]
-    H = params["H"]
-    a = params["a"]
-    b = params["b"]
-    c = params["c"]
-    mu = params["mu"]
-    tau = params["tau"]
-    r = params["r"]
-
-    # Weighted prevalence at each destination (column)
-    # k_j = sum_i(pij[i,j] * X[i] * H[i]) / sum_i(pij[i,j] * H[i])
-    k = (X * H) @ pij / (H @ pij)
-
-    # Force of infection: dC
-    Z_numer = a**2 * b * c * np.exp(-mu * tau) * k
-    Z_denom = a * c * k + mu
-    dC = (m * Z_numer / Z_denom) @ pij.T * (1 - X)
-
-    dX = dC - r * X
-
-    return np.concatenate([dX, dC])
-
-
-# ============================================================
-# Analytical mosquito density from equilibrium prevalence
+# Helper: analytical mosquito density from equilibrium prevalence
 # ============================================================
 def analytical_mosquito_density(ivector, hvector, pij, a, b, c, mu, r, tau):
     xvector = ivector / r
@@ -75,7 +55,6 @@ def make_seasonal_sinusoidal(amplitude=0.8, peak_day=180):
 
 def make_seasonal_normal(peak_day=180, sd_days=60, baseline=0.1):
     peak_val = norm.pdf(peak_day, loc=peak_day, scale=sd_days)
-
     def seasonal_fn(t):
         day_of_year = t % 365
         return baseline + (1 - baseline) * norm.pdf(day_of_year, loc=peak_day, scale=sd_days) / peak_val
@@ -83,150 +62,245 @@ def make_seasonal_normal(peak_day=180, sd_days=60, baseline=0.1):
 
 
 # ============================================================
-# Parameters
+# Default parameters
 # ============================================================
-a = 0.3
-b = 0.1
-c = 0.214
-r = 1 / 150
-mu = 1 / 10
-tau = 10
+default_pars = sc.objdict(
+    a   = 0.3,      # Biting rate
+    b   = 0.1,      # Mosquito-to-human transmission probability
+    c   = 0.214,    # Human-to-mosquito transmission probability
+    r   = 1 / 150,  # Recovery rate (per day)
+    mu  = 1 / 10,   # Mosquito death rate (per day)
+    tau = 10,        # Extrinsic incubation period (days)
+)
 
-# Synthetic 3-patch data
-numpatch = 3
-hvector = np.array([5000.0, 10000.0, 8000.0])
-ivector = np.array([0.001, 0.003, 0.002])
-
-# Mobility matrix (rows=residence, cols=destination; rows sum to 1)
-pij = np.array([
+# Default synthetic 3-patch data
+default_hvector = np.array([5000.0, 10000.0, 8000.0])
+default_ivector = np.array([0.001, 0.003, 0.002])
+default_pij = np.array([
     [0.85, 0.10, 0.05],
     [0.08, 0.80, 0.12],
     [0.06, 0.09, 0.85],
 ])
 
-# Solve for baseline mosquito density
-m_base = analytical_mosquito_density(ivector, hvector, pij, a, b, c, mu, r, tau)
-m_base = np.clip(m_base, 1e-10, None)
-print(f"Baseline mosquito density (m): {np.round(m_base, 4)}")
 
-# Choose seasonal forcing
-seasonal_fn = make_seasonal_sinusoidal(amplitude=0.8, peak_day=180)
-# Alternative: seasonal_fn = make_seasonal_normal(peak_day=180, sd_days=60, baseline=0.1)
+class Malaria_SS(ss.Module):
+    """
+    Compartmental Starsim implementation of the malaria transmission model (Euler integration).
+
+    Multi-patch Ross-Macdonald model with seasonal mosquito density forcing and
+    human mobility between patches.
+
+    Because this is a self-contained module, it does not need a network or People.
+
+    See default_pars for parameter definitions.
+
+    Example
+    -------
+    ::
+
+        import starsim as ss
+        from demo_sim_ss import Malaria_SS
+
+        mal = Malaria_SS()
+        sim = ss.Sim(modules=mal, start=0, stop=365*5, dt=1, n_agents=1)
+        sim.run()
+        sim.modules.malaria_ss.plot()
+    """
+
+    def __init__(self, hvector=None, ivector=None, pij=None, seasonal_fn=None, **kwargs):
+        super().__init__()
+        self.define_pars(**default_pars)
+        self.update_pars(**kwargs)
+
+        # Store patch data
+        self.hvector = hvector if hvector is not None else default_hvector.copy()
+        self.ivector = ivector if ivector is not None else default_ivector.copy()
+        self.pij = pij if pij is not None else default_pij.copy()
+        self.seasonal_fn = seasonal_fn if seasonal_fn is not None else make_seasonal_sinusoidal()
+        self.numpatch = len(self.hvector)
+
+        # Compartment labels
+        self.c_labels = sc.objdict()
+        for i in range(self.numpatch):
+            self.c_labels[f'X_{i}'] = f'Prevalence (Patch {i+1})'
+            self.c_labels[f'C_{i}'] = f'Cumulative incidence (Patch {i+1})'
+
+        # Compartments (scalars, not per-agent states)
+        self.c = sc.objdict({key: 0.0 for key in self.c_labels})
+
+        # Will be computed in init_post
+        self.m_base = None
+        return
+
+    def init_post(self):
+        """Compute baseline mosquito density and set initial conditions."""
+        super().init_post()
+        p = self.pars
+        n = self.numpatch
+
+        # Analytical mosquito density from equilibrium
+        self.m_base = analytical_mosquito_density(
+            self.ivector, self.hvector, self.pij,
+            p.a, p.b, p.c, p.mu, p.r, p.tau,
+        )
+        self.m_base = np.clip(self.m_base, 1e-10, None)
+
+        # Initial prevalence = incidence / recovery rate
+        x0 = self.ivector / p.r
+        for i in range(n):
+            self.c[f'X_{i}'] = x0[i]
+            self.c[f'C_{i}'] = 0.0
+        return
+
+    def step(self):
+        """Euler integration of the multi-patch malaria ODE system."""
+        p = self.pars
+        c = self.c
+        n = self.numpatch
+        t = self.now
+        dt = float(self.dt)
+
+        # Current state vectors
+        X = np.array([c[f'X_{i}'] for i in range(n)])
+
+        # Seasonal mosquito density
+        m = self.m_base * self.seasonal_fn(t)
+
+        # Weighted prevalence at each destination
+        # k_j = sum_i(pij[i,j] * X[i] * H[i]) / sum_i(pij[i,j] * H[i])
+        H = self.hvector
+        pij = self.pij
+        k = (X * H) @ pij / (H @ pij)
+
+        # Force of infection
+        Z_numer = p.a**2 * p.b * p.c * np.exp(-p.mu * p.tau) * k
+        Z_denom = p.a * p.c * k + p.mu
+        dC = (m * Z_numer / Z_denom) @ pij.T * (1 - X)
+
+        dX = dC - p.r * X
+
+        # Euler update
+        for i in range(n):
+            c[f'X_{i}'] += dX[i] * dt
+            c[f'C_{i}'] += dC[i] * dt
+        return
+
+    def init_results(self):
+        """Initialize results for all compartments and derived quantities."""
+        super().init_results()
+        n = self.numpatch
+        results = []
+
+        # Compartment results
+        for key, label in self.c_labels.items():
+            results.append(ss.Result(key, label=label))
+
+        # Derived quantities per patch
+        for i in range(n):
+            results.append(ss.Result(f'daily_inc_{i}', label=f'Daily incidence (Patch {i+1})'))
+            results.append(ss.Result(f'm_seasonal_{i}', label=f'Mosquito density (Patch {i+1})'))
+            results.append(ss.Result(f'eir_{i}', label=f'EIR (Patch {i+1})'))
+
+        self.define_results(*results)
+        return
+
+    def update_results(self):
+        """Store current state and compute derived quantities."""
+        super().update_results()
+        ti = self.ti
+        c = self.c
+        p = self.pars
+        n = self.numpatch
+        t = self.now
+
+        # Store compartment values
+        for key in c:
+            self.results[key][ti] = c[key]
+
+        # Current state
+        X = np.array([c[f'X_{i}'] for i in range(n)])
+        m_seasonal = self.m_base * self.seasonal_fn(t)
+
+        # Daily incidence (dC values)
+        H = self.hvector
+        pij = self.pij
+        k = (X * H) @ pij / (H @ pij)
+        Z_numer = p.a**2 * p.b * p.c * np.exp(-p.mu * p.tau) * k
+        Z_denom = p.a * p.c * k + p.mu
+        dC = (m_seasonal * Z_numer / Z_denom) @ pij.T * (1 - X)
+
+        # EIR
+        Z = p.a * p.c * k * np.exp(-p.mu * p.tau) / (p.a * p.c * k + p.mu)
+        eir = m_seasonal * p.a * (Z @ pij.T)
+
+        for i in range(n):
+            self.results[f'daily_inc_{i}'][ti] = dC[i]
+            self.results[f'm_seasonal_{i}'][ti] = m_seasonal[i]
+            self.results[f'eir_{i}'][ti] = eir[i]
+        return
+
+    def plot(self, **kwargs):
+        """Plot prevalence, daily incidence, mosquito density, and EIR."""
+        n = self.numpatch
+        patch_names = [f'Patch {i+1}' for i in range(n)]
+        results = self.results
+        kw = sc.mergedicts(dict(lw=1, alpha=0.8), kwargs)
+
+        with sc.options.with_style('fancy'):
+            fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+            fig.suptitle('Malaria Transmission Model with Seasonal Forcing', fontsize=14, fontweight='bold')
+
+            # Prevalence
+            ax = axes[0, 0]
+            for i, name in enumerate(patch_names):
+                ax.plot(results.timevec, results[f'X_{i}'].values, label=name, **kw)
+            ax.set_title('Prevalence')
+            ax.set_xlabel('Time (days)')
+            ax.set_ylabel('Proportion infected')
+            ax.legend()
+            sc.boxoff(ax)
+
+            # Daily incidence
+            ax = axes[0, 1]
+            for i, name in enumerate(patch_names):
+                ax.plot(results.timevec, results[f'daily_inc_{i}'].values, label=name, **kw)
+            ax.set_title('Daily incidence')
+            ax.set_xlabel('Time (days)')
+            ax.set_ylabel('New infections per person per day')
+            ax.legend()
+            sc.boxoff(ax)
+
+            # Mosquito density
+            ax = axes[1, 0]
+            for i, name in enumerate(patch_names):
+                ax.plot(results.timevec, results[f'm_seasonal_{i}'].values, label=name, **kw)
+            ax.set_title('Seasonal mosquito density m(t)')
+            ax.set_xlabel('Time (days)')
+            ax.set_ylabel('Mosquitoes per person')
+            ax.legend()
+            sc.boxoff(ax)
+
+            # EIR
+            ax = axes[1, 1]
+            for i, name in enumerate(patch_names):
+                ax.plot(results.timevec, results[f'eir_{i}'].values, label=name, **kw)
+            ax.set_title('Entomological inoculation rate (EIR)')
+            ax.set_xlabel('Time (days)')
+            ax.set_ylabel('EIR')
+            ax.legend()
+            sc.boxoff(ax)
+
+            sc.figlayout()
+
+        return ss.return_fig(fig)
+
 
 # ============================================================
-# Run simulation
+# Run if executed directly
 # ============================================================
-n_years = 5
-t_span = (1, 365 * n_years)
-t_eval = np.arange(1, 365 * n_years + 1)
-
-params = dict(
-    numpatch=numpatch, c=c, b=b, a=a, mu=mu,
-    tau=tau, r=r, pij=pij, H=hvector,
-    m_base=m_base, seasonal_fn=seasonal_fn,
-)
-
-# Start from equilibrium prevalence
-x0 = np.concatenate([ivector / r, np.zeros(numpatch)])
-
-print(f"Running seasonal simulation for {n_years} years...")
-sol = solve_ivp(
-    malaria_ode_seasonal, t_span, x0,
-    args=(params,), t_eval=t_eval, method="LSODA",
-)
-print("Simulation complete.")
-
-times = sol.t
-states = sol.y.T  # shape (n_times, 2*numpatch)
-
-# ============================================================
-# Derived quantities
-# ============================================================
-patch_names = [f"Patch {i+1}" for i in range(numpatch)]
-
-# Prevalence
-prev_mat = states[:, :numpatch]
-
-# Daily incidence (diff of cumulative)
-cum_mat = states[:, numpatch:]
-daily_inc = np.diff(cum_mat, axis=0, prepend=cum_mat[0:1, :])
-
-# Seasonal m(t) for each patch over time
-m_seasonal = np.array([m_base * seasonal_fn(t) for t in times])
-
-# EIR: entomological inoculation rate
-eir_mat = np.zeros((len(times), numpatch))
-for ti in range(len(times)):
-    X = prev_mat[ti]
-    k = (X * hvector) @ pij / (hvector @ pij)
-    Z = a * c * k * np.exp(-mu * tau) / (a * c * k + mu)
-    eir_mat[ti] = m_seasonal[ti] * a * (Z @ pij.T)
-
-# ============================================================
-# Interactive plots
-# ============================================================
-plt.ion()
-
-fig, axes = plt.subplots(3, 2, figsize=(14, 12))
-fig.suptitle("Malaria Transmission Model with Seasonal Forcing", fontsize=14, fontweight="bold")
-
-# --- 1. Seasonal forcing: mosquito density multiplier over one year ---
-ax = axes[0, 0]
-one_year = np.arange(1, 366)
-forcing_vals = [seasonal_fn(d) for d in one_year]
-ax.plot(one_year, forcing_vals, color="darkgreen", linewidth=1)
-ax.axhline(1, linestyle="--", alpha=0.5, color="gray")
-ax.set_title("Seasonal forcing: mosquito density multiplier")
-ax.set_xlabel("Day of year")
-ax.set_ylabel("Multiplier on baseline m")
-
-# --- 2. Mosquito density m(t) by patch ---
-ax = axes[0, 1]
-for i, name in enumerate(patch_names):
-    ax.plot(times, m_seasonal[:, i], linewidth=0.6, label=name)
-ax.set_title("Mosquito density m(t) by patch (seasonal)")
-ax.set_xlabel("Time (days)")
-ax.set_ylabel("Mosquitoes per person (m)")
-ax.legend()
-
-# --- 3. Prevalence dynamics ---
-ax = axes[1, 0]
-for i, name in enumerate(patch_names):
-    ax.plot(times, prev_mat[:, i], linewidth=0.7, label=name)
-ax.set_title("Endemic prevalence dynamics with seasonal forcing")
-ax.set_xlabel("Time (days)")
-ax.set_ylabel("Prevalence (proportion infected)")
-ax.legend()
-
-# --- 4. Daily incidence by patch ---
-ax = axes[1, 1]
-for i, name in enumerate(patch_names):
-    ax.plot(times, daily_inc[:, i], linewidth=0.5, alpha=0.8, label=name)
-ax.set_title("Daily incidence (new infections per person per day)")
-ax.set_xlabel("Time (days)")
-ax.set_ylabel("Daily incidence")
-ax.legend()
-
-# --- 5. Prevalence zoomed to last year ---
-last_year_mask = times > 365 * (n_years - 1)
-ax = axes[2, 0]
-for i, name in enumerate(patch_names):
-    ax.plot(times[last_year_mask], prev_mat[last_year_mask, i], linewidth=0.8, label=name)
-ax.set_title(f"Prevalence: year {n_years} (stabilized seasonal cycle)")
-ax.set_xlabel("Time (days)")
-ax.set_ylabel("Prevalence")
-ax.legend()
-
-# --- 6. Daily incidence zoomed to last year ---
-ax = axes[2, 1]
-for i, name in enumerate(patch_names):
-    ax.plot(times[last_year_mask], daily_inc[last_year_mask, i], linewidth=0.8, label=name)
-ax.set_title(f"Daily incidence: year {n_years} (stabilized seasonal cycle)")
-ax.set_xlabel("Time (days)")
-ax.set_ylabel("Daily incidence")
-ax.legend()
-
-fig.tight_layout()
-plt.show(block=True)
-
-print("Done.")
+if __name__ == '__main__':
+    mal = Malaria_SS()
+    sim = ss.Sim(modules=mal, copy_inputs=False, start=0, stop=365*5, dt=1, n_agents=1)
+    sim.run()
+    mal.plot()
+    plt.show()
