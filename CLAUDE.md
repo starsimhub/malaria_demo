@@ -8,23 +8,43 @@ Technology demonstrator for modeling malaria transmission dynamics, focused on t
 
 ## Architecture
 
-The codebase lives entirely in `mahmud_model/` and consists of R scripts and a custom Rcpp package:
+The codebase has two layers: the original research model in `mahmud_model/` and progressively simplified demo scripts in the root directory.
 
-### Core Model
-- **`change_m_incidence_union.R`** - Main simulation script. Runs the ODE model to equilibrium, then perturbs mosquito density (`m`) to zero in each patch one at a time (parallelized with `foreach`/`doParallel` on 80 cores). Outputs saved as RDS files in `analysis/`.
-- **`make_output_csv.R`** - Post-processing script. Reads equilibrium and perturbation results, computes metrics (R0, source/sink scores, proportion imported infections), and writes summary CSVs to `analysis/`.
-- **`R0_map.R`** - Computes and maps R0 with and without movement using the analytical mosquito density formula. Uses `sf` for spatial visualization.
-- **`gravity_model.R`** - Fits negative binomial gravity models to travel data (both inter-patch travel and proportion staying). Fills in missing mobility data with model predictions.
+### Demo scripts (root directory) — model evolution chain
 
-### Key Functions
-- **`malaria.ode.residence.analytical()`** - Analytically solves for mosquito density vector `m` given observed incidence, population, mobility matrix, and Ross-Macdonald parameters (a, b, c, mu, r, tau). Appears in multiple scripts.
-- **`malaria.ode.fast()`** - ODE right-hand side function for `deSolve::ode()`. Uses Rcpp matrix multiplication for performance.
-- **`rootfun()`** - Root-finding function for detecting ODE equilibrium (sum of absolute derivatives < 1e-13).
+Each step simplifies/translates the previous one:
 
-### Rcpp Package (`RcppFunctions/`)
-- `eigenMapMatMult()` - Fast matrix multiplication via RcppEigen
-- `malaria_ode_cpp()` - C++ implementation of the ODE system (alternative to the R version)
-- Depends on: Rcpp, RcppEigen
+1. **`mahmud_model/` (original)** — Full research codebase in R with Rcpp. Runs on real 118-patch Bangladesh data via HPC. See "Original Mahmud Model" section below.
+
+2. **`mahmud_model/demo_sim.R` (intermediate demo)** — Simplified to a 3-patch toy example with constant mosquito density. Runs to equilibrium, does perturbation experiments (set m=0 per patch), computes R0/source-sink metrics. No external data needed. No seasonality.
+
+3. **`demo_sim_endemic.R` (seasonal R demo)** — Adds seasonal mosquito density forcing (sinusoidal or normal-curve) to the 3-patch model. Runs 5-year simulation from equilibrium initial conditions. Plots prevalence, incidence, mosquito density, and EIR. Self-contained, no Rcpp dependency.
+
+4. **`demo_sim.py` (Python translation)** — Direct translation of `demo_sim_endemic.R` to Python. Uses `scipy.integrate.solve_ivp` (LSODA), numpy, matplotlib. Same model equations, same synthetic data.
+
+5. **`demo_sim_ss.py` (Starsim version)** — Reimplements the model as a `starsim.Module` (`Malaria_SS` class) with Euler integration. Importable as a library or run standalone. Uses `sciris` for parameter management and plotting.
+
+### Key shared functions across all versions
+
+- **`analytical_mosquito_density()` / `malaria.ode.residence.analytical()`** — Analytically solves for mosquito density vector `m` given observed incidence, population, mobility matrix, and Ross-Macdonald parameters. Used to initialize baseline `m` from equilibrium prevalence.
+
+- **ODE system** — Multi-patch Ross-Macdonald with mobility: computes weighted prevalence `k` at each destination via the mobility matrix `pij`, then force of infection incorporating sporogony delay (`exp(-mu*tau)`).
+
+- **Seasonal forcing** — `make_seasonal_sinusoidal()` and `make_seasonal_normal()` modulate baseline mosquito density over time.
+
+### Original Mahmud Model (`mahmud_model/`)
+
+Full research codebase for the published analysis:
+
+- **`change_m_incidence_union.R`** — Main HPC simulation script. Runs ODE to equilibrium, then perturbs mosquito density to zero in each patch (parallelized with `foreach`/`doParallel` on 80 cores). Outputs saved as RDS files.
+- **`make_output_csv.R`** — Post-processing: computes R0, source/sink scores, proportion imported infections.
+- **`R0_map.R`** — Computes and maps R0 with/without movement using `sf`.
+- **`gravity_model.R`** — Fits negative binomial gravity models to fill missing mobility data.
+
+### Rcpp Package (`mahmud_model/RcppFunctions/`)
+- `eigenMapMatMult()` — Fast matrix multiplication via RcppEigen
+- `malaria_ode_cpp()` — C++ ODE system implementation
+- Install: `R CMD INSTALL mahmud_model/RcppFunctions`
 
 ### Model Parameters
 | Parameter | Description | Typical Value |
@@ -37,22 +57,29 @@ The codebase lives entirely in `mahmud_model/` and consists of R scripts and a c
 | `tau` | Extrinsic incubation period | 10 |
 
 ### Data Dependencies (not in repo)
-Scripts expect data files in a `data/` directory:
-- `Bangladesh_pij_include_absent.txt` - Mobility/movement matrix (Pij)
-- `Bangladesh_inc_pop.txt` - Incidence and population by patch (columns: `union`, `upa`, `inc`, `H`)
-- `chittagongsubset/chit_east_250818.shp` - Shapefile for mapping
-- Various CSVs for gravity model fitting (referenced via `here()`)
+Original Mahmud model scripts expect data files in a `data/` directory:
+- `Bangladesh_pij_include_absent.txt` — Mobility/movement matrix (Pij)
+- `Bangladesh_inc_pop.txt` — Incidence and population by patch
+- `chittagongsubset/chit_east_250818.shp` — Shapefile for mapping
+
+Demo scripts are fully self-contained with synthetic 3-patch data.
 
 ## Running
 
-R scripts are meant to be run individually (not as a pipeline). The typical workflow:
-1. Fit gravity model to fill missing mobility data (`gravity_model.R`)
-2. Run perturbation simulations (`change_m_incidence_union.R`) - requires HPC with many cores
-3. Generate output metrics (`make_output_csv.R`)
-4. Visualize R0 maps (`R0_map.R`)
+**R demos:**
+```bash
+Rscript demo_sim_endemic.R          # seasonal 3-patch demo
+Rscript mahmud_model/demo_sim.R     # constant-m equilibrium + perturbation demo
+```
 
-To install the Rcpp package: `R CMD INSTALL mahmud_model/RcppFunctions`
+**Python demos:**
+```bash
+python demo_sim.py                  # scipy ODE version
+python demo_sim_ss.py               # Starsim module version
+```
 
-## Key R Dependencies
+## Key Dependencies
 
-deSolve, dplyr, sf, ggplot2, Rcpp, RcppEigen, foreach, doParallel, MASS, tidyverse, magrittr
+**R:** deSolve, ggplot2, dplyr, sf, Rcpp, RcppEigen, foreach, doParallel, MASS, tidyverse, magrittr
+
+**Python:** numpy, scipy, matplotlib, starsim, sciris
