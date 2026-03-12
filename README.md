@@ -59,6 +59,11 @@ Rscript demo_sim_endemic.R          # seasonal 3-patch demo
 Rscript mahmud_model/demo_sim.R     # constant-m equilibrium + perturbation demo
 ```
 
+**Python installation**
+```bash
+pip install -r requirements.txt
+```
+
 **Python scripts** (require `numpy`, `scipy`, `matplotlib`):
 ```bash
 python demo_sim.py                  # scipy ODE version
