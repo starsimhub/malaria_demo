@@ -1,10 +1,14 @@
 # Malaria modeling Starsim demo
 
+> [!Warning] **This is a demonstration project only. It is not intended to be used as a functional malaria model.**
+
 Technology demonstrator for modeling malaria transmission dynamics in R, Python, and Starsim. Uses a Ross-Macdonald-type metapopulation ODE model incorporating human mobility between patches (unions/upazilas).
 
 Based on the following paper:
 
 > Mahmud, A.S., Chang, MC., Citron, D.T. et al. Identifying malaria elimination strategies in the presence of human movement in Bangladesh. Commun Med 5, 461 (2025). https://doi.org/10.1038/s43856-025-01145-6
+
+Converted from R → Python → Starsim using [Starsim-AI](https://ai.starsim.org) the Claude prompts listed [here](claude_prompt_history.md).
 
 ## Model evolution
 
